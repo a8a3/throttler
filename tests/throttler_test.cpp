@@ -145,3 +145,30 @@ TYPED_TEST(ThrottlerTypedTest, ThrowsWhenShuttingDown) {
     EXPECT_TRUE(exceptionCaught);
     EXPECT_STREQ(what.c_str(), "Throttler is shutting down, request aborted");
 }
+
+TYPED_TEST(ThrottlerTypedTest, FinishingServiceThreadWhenShuttingDown) {
+    auto throttler = std::make_unique<Throttler>(1, 1);
+
+    // no free tokens
+    throttler->Throttle();
+
+    auto startTime = std::chrono::high_resolution_clock::now();
+    std::thread waiter([&throttler] {
+        try {
+            throttler->Throttle();
+        } catch (const std::runtime_error& error) {
+            // do nothing...
+        }
+    });
+    
+    // Ensure waiter has entered Throttle() before destroying
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    
+    throttler.reset();
+
+    auto endTime = std::chrono::high_resolution_clock::now();
+    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(endTime - startTime);
+    EXPECT_LT(duration.count(), 500) << "Sevice thread should be woken up by the Throttler destructor";
+
+    waiter.join();
+}
