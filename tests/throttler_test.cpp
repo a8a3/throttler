@@ -3,6 +3,8 @@
 
 #include <atomic>
 #include <chrono>
+#include <memory>
+#include <string>
 #include <thread>
 #include <vector>
 
@@ -116,4 +118,30 @@ TYPED_TEST(ThrottlerTypedTest, ThrottleBlocksWhenNoTokens) {
     consumer.join();
 
     EXPECT_TRUE(blockDetected);
+}
+
+TYPED_TEST(ThrottlerTypedTest, ThrowsWhenShuttingDown) {
+    auto throttler = std::make_unique<Throttler>(1, 1);
+
+    // no free tokens
+    throttler->Throttle();
+
+    std::atomic_bool exceptionCaught{false};
+    std::string what;
+    std::thread waiter([&throttler, &exceptionCaught, &what]() {
+        try {
+            throttler->Throttle();
+        } catch (const std::runtime_error& error) {
+            exceptionCaught = true;
+            what = error.what();
+        }
+    });
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    // waiter is waitin on Throttler()
+    throttler.reset();
+
+    waiter.join();
+    EXPECT_TRUE(exceptionCaught);
+    EXPECT_STREQ(what.c_str(), "Throttler is shutting down, request aborted");
 }

@@ -53,10 +53,13 @@ public:
 
     void Throttle() {
         // если есть свободные токены- взять один и продолжить выполнение,
-        // если нет- ждать пока не появится
+        // если нет- ждать пока не появится или пока не будет вызван деструктор Throttler'a
         std::unique_lock lock{mtx_};
         cv_.wait(lock, [this] () {return currentTokensNum_ > 0 || !isRunning_;});
-        if (!isRunning_) return;
+        if (!isRunning_) {
+            // отказ ожидающим потокам при уничтожении Throttler'a
+            throw std::runtime_error("Throttler is shutting down, request aborted");
+        }
         --currentTokensNum_;
      }
 
