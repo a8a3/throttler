@@ -192,14 +192,8 @@ TYPED_TEST(ThrottlerTypedTest, FinishingServiceThreadWhenShuttingDown) {
 }
 
 TYPED_TEST(ThrottlerTypedTest, TokensDoNotExceedMaxCapacity) {
-// TODO: 
-    if constexpr (std::is_same_v<TypeParam, basic::Throttler>) {
-        GTEST_SKIP() << "basic::Throttler has a race in TokensDoNotExceedMaxCapacity";
-    }
-
     TypeParam throttler{2, 3};  // rate = 2/sec, max tokens = 3
-
-    std::this_thread::sleep_for(2s);
+    std::this_thread::sleep_for(2'100ms);
 
     auto start = Clock::now();
     for (int i = 0; i < 3; ++i) {
