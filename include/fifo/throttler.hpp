@@ -99,7 +99,7 @@ private:
 
         void wake() {
             awaken = true;
-            cv_.notify_all();
+            cv_.notify_one();
         }
 
         void cancel() {
