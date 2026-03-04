@@ -2,6 +2,7 @@
 
 #include "../include/basic/throttler.hpp"
 #include "../include/no_service_thread/throttler.hpp"
+#include "../include/fifo/throttler.hpp"
 
 #include <atomic>
 #include <chrono>
@@ -22,7 +23,8 @@ auto toMs(Duration d) {
 
 using ThrottlerTypes = ::testing::Types<
     basic::Throttler,
-    no_service_thread::Throttler
+    no_service_thread::Throttler,
+    fifo::Throttler
 >;
 
 template <typename ThrottlerType>
@@ -45,15 +47,12 @@ TYPED_TEST(ThrottlerTypedTest, ConstructorThrowsOnInvalidArguments) {
 
 TYPED_TEST(ThrottlerTypedTest, ConsumeSingleToken) {
     auto startTime = Clock::now();
-    
     for (int i = 0; i < 10; ++i) {
         this->throttler.Throttle();
     }
+    auto msSpent = toMs(Clock::now() - startTime).count();
     
-    auto endTime = Clock::now();
-    auto duration = toMs(endTime - startTime);
-    
-    EXPECT_LT(duration.count(), 10) << "All 10 tokens should be consumed without blocking"; 
+    EXPECT_LT(msSpent, 10) << "All 10 tokens should be consumed without blocking"; 
 }
 
 TYPED_TEST(ThrottlerTypedTest, TokenReplenishment) {
@@ -256,4 +255,31 @@ TYPED_TEST(ThrottlerTypedTest, RateAccuracy) {
     const double expected = static_cast<double>(samples) / rate * 1000.0;
     EXPECT_GT(elapsed.count(), expected * 0.95) << "Rate too fast";
     EXPECT_LT(elapsed.count(), expected * 1.05) << "Rate too slow";
+}
+
+TEST(FifoThrottlerTest, WaitersAreServedInFifoOrder) {
+    fifo::Throttler throttler{1, 1}; // rate = 1/sec
+    throttler.Throttle();  // no free tokens, all threads will be queued
+
+    const int numThreads = 5;
+    std::vector<int> completionOrder;
+    std::mutex orderMtx;
+
+    std::vector<std::thread> threads;
+    for (int i = 0; i < numThreads; ++i) {
+        threads.emplace_back([&, i] {
+            throttler.Throttle();
+            std::lock_guard lock{orderMtx};
+            completionOrder.push_back(i);
+        });
+        std::this_thread::sleep_for(20ms);
+    }
+
+    for (auto& t: threads) 
+        t.join();
+
+    ASSERT_EQ(static_cast<int>(completionOrder.size()), numThreads);
+    for (int i = 0; i < numThreads; ++i) {
+        EXPECT_EQ(completionOrder[i], i) << "Thread " << i << " should be in position " << i;
+    }
 }
