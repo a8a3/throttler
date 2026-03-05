@@ -40,21 +40,19 @@ public:
     }
 
     void Throttle() {
-        std::unique_lock lock{mtx_};
-
-        if (tokens_ > 0) {
-            --tokens_;
-            return;
+        // положить запрос в очередь отложенных запросов
+        // если есть свободный токен- извлечь из очереди и выполнить
+        // если нет- ждать пробуждения(появился токен) или отмены(вызов деструктора Throttler)
+        PendingRequest request;
+        {
+            std::unique_lock lock{mtx_};
+            pendingRequests_.push(&request);
+            TryDrainPendingRequestsQueue();
         }
+        std::unique_lock requestLock{request.mtx_};
+        request.cv_.wait(requestLock, [&request] { return request.awaken_ || request.cancelled_; });
 
-        // положить запрос в очередь отложенных запросов и приостановить
-        // отправивший запрос поток до появления свободного токена
-        // или до вызова деструктора Throttler'a
-        auto request = std::make_shared<PendingRequest>();
-        pendingRequests_.push(request);
-        request->cv_.wait(lock, [&request] { return request->awaken; });
-
-        if (request->cancelled) {
+        if (request.cancelled_) {
             throw std::runtime_error("Throttler is shutting down, request aborted");
         }
     }
@@ -76,7 +74,7 @@ private:
             {
                 std::lock_guard lock{mtx_};
                 tokens_ = std::min(maxTokens_, tokens_ + static_cast<int>((nextTp - tp) / timePerToken_));
-                DrainPendingRequestsQueue();
+                TryDrainPendingRequestsQueue();
             }
             timeError = (nextTp - tp) % timePerToken_;
             tp = nextTp - timeError;
@@ -84,7 +82,7 @@ private:
     }
 
     // может быть вызван только под mtx_ мьютексом
-    void DrainPendingRequestsQueue() {
+    void TryDrainPendingRequestsQueue() {
         while (!pendingRequests_.empty() && tokens_ > 0) {
             --tokens_;
             pendingRequests_.front()->wake();
@@ -94,21 +92,28 @@ private:
 
     struct PendingRequest {
         std::condition_variable cv_;
-        bool awaken{false};
-        bool cancelled{false};
+        std::mutex mtx_;
+        bool awaken_{false};
+        bool cancelled_{false};
 
         void wake() {
-            awaken = true;
+            {
+                std::lock_guard lock{mtx_};
+                awaken_ = true;
+            }
             cv_.notify_one();
         }
 
         void cancel() {
-            cancelled = true;
-            wake();
+            {
+                std::lock_guard lock{mtx_};
+                cancelled_ = true;
+            }
+            cv_.notify_one();
         }
     };
     // PendingRequest некопируемый, поэтому в очереди указатели
-    using PendingRequestsQueue = std::queue<std::shared_ptr<PendingRequest>>;
+    using PendingRequestsQueue = std::queue<PendingRequest*>;
 
     Clock::duration timePerToken_;
     int maxTokens_{};
