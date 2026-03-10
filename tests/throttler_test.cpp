@@ -3,6 +3,7 @@
 #include "../include/basic/throttler.hpp"
 #include "../include/no_service_thread/throttler.hpp"
 #include "../include/fifo/throttler.hpp"
+#include "../include/no_service_thread_fifo/throttler.hpp"
 
 #include <atomic>
 #include <chrono>
@@ -24,7 +25,13 @@ auto toMs(Duration d) {
 using ThrottlerTypes = ::testing::Types<
     basic::Throttler,
     no_service_thread::Throttler,
-    fifo::Throttler
+    fifo::Throttler,
+    no_service_thread_fifo::Throttler
+>;
+
+using FifoThrottlerTypes = ::testing::Types<
+    fifo::Throttler,
+    no_service_thread_fifo::Throttler
 >;
 
 template <typename ThrottlerType>
@@ -257,8 +264,13 @@ TYPED_TEST(ThrottlerTypedTest, RateAccuracy) {
     EXPECT_LT(elapsed.count(), expected * 1.05) << "Rate too slow";
 }
 
-TEST(FifoThrottlerTest, WaitersAreServedInFifoOrder) {
-    fifo::Throttler throttler{1, 1}; // rate = 1/sec
+template <typename ThrottlerType>
+class FifoThrottlerTypedTest : public ::testing::Test {};
+
+TYPED_TEST_SUITE(FifoThrottlerTypedTest, FifoThrottlerTypes);
+
+TYPED_TEST(FifoThrottlerTypedTest, WaitersAreServedInFifoOrder) {
+    TypeParam throttler{1, 1}; // rate = 1/sec
     throttler.Throttle();  // no free tokens, all threads will be queued
 
     const int numThreads = 5;
