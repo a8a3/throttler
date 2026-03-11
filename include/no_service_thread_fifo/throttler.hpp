@@ -27,78 +27,97 @@ public:
     Throttler& operator=(const Throttler&) = delete;
 
     ~Throttler() {
-        {
-            std::unique_lock lock{mtx_};
-            isRunning_ = false;
-        }
-        cv_.notify_all();
-
         std::unique_lock lock{mtx_};
-        cv_.wait(lock, [this] { return activeThrottleCalls_ == 0; });
+        isRunning_ = false;
+
+        // отменить все запросы оставшиеся в очереди
+        while (!pendingRequests_.empty()) {
+            pendingRequests_.front()->cancel();
+            pendingRequests_.pop();
+        }
+
+        // дождаться пока все активные вызовы Throttle завершатся
+        guardCv_.wait(lock, [this] { return 0 == activeThrottleCalls_; });
     }
 
     void Throttle() {
-        std::unique_lock lock{mtx_};
-
-        if (!isRunning_) {
-            throw std::runtime_error("Throttler is shutting down, request aborted");
+        PendingRequest request;
+        {
+            std::unique_lock lock{mtx_};
+            if (!isRunning_) {
+                throw std::runtime_error("Throttler is shutting down, request aborted");
+            }
+            ++activeThrottleCalls_;
+            pendingRequests_.push(&request);
         }
 
-        // учет количества активных потоков, вызвавших Throttle
         struct Guard {
             Throttler* self_;
-            Guard(Throttler* t) : self_{t} { ++self_->activeThrottleCalls_; }
+            Guard(Throttler* t) : self_{t} {}
             ~Guard() {
-                --self_->activeThrottleCalls_;
-                if (self_->activeThrottleCalls_ == 0)
-                    self_->cv_.notify_all();
+                std::lock_guard lock{self_->mtx_};
+                if (--self_->activeThrottleCalls_ == 0)
+                    self_->guardCv_.notify_one();
             }
         } guard{this};
-
-        const TicketNumber myTicket = nextTicket_++;
-        queue_.push(myTicket);
         
         while (true) {
+            std::unique_lock lock{mtx_};
             tryAddTokens();
 
-            if (queue_.front() == myTicket && currentTokensNum_ > 0) {
-                --currentTokensNum_;
-                queue_.pop();
-                cv_.notify_all(); // разбудить следующего в голове очереди, если он есть
-                return;
-            }
+            std::unique_lock requestLock{request.mtx_};
+            if (pendingRequests_.front() == &request) {
+                 if (currentTokensNum_ > 0) {
+                    --currentTokensNum_;
+                    pendingRequests_.pop();
+                    
+                    // разбудить следующего в очереди, независимо от наличия токенов, 
+                    // теперь он ответственен за продвижение времени и добавление токенов
+                    if (!pendingRequests_.empty()) {
+                        pendingRequests_.front()->wake();
+                    }
+                    return;
+                }
+                auto nextTokenTime = lastAddTokenTime_ + tokenAddInterval_;
+                lock.unlock();
 
-            if (queue_.front() == myTicket) {
-                // голова очереди, но нет токенов — ждать до времени добавления следующего токена или до нотификации на остановку
-                const auto nextTokenTime = lastAddTokenTime_ + std::chrono::duration_cast<Clock::duration>(tokenAddInterval_);
-                cv_.wait_until(lock, nextTokenTime, [this] { return !isRunning_; });
+                // голова очереди ждет до появления следующего токена или отмены
+                request.cv_.wait_until(
+                    requestLock, 
+                    nextTokenTime,
+                    [&request] { return request.awaken_ || request.cancelled_; });
             } else {
-                // не голова очереди, ждать пока не станет головой или не будет нотификации на остановку
-                cv_.wait(lock, [this, myTicket] {
-                    return !isRunning_ || (!queue_.empty() && queue_.front() == myTicket);
+                lock.unlock();
+
+                // хвост очереди ждет пока не станет головой или не будет отменен
+                request.cv_.wait(requestLock, [&request] {
+                    return request.cancelled_ || request.awaken_;
                 });
             }
 
-            if (!isRunning_) {
+            if (request.cancelled_) {
                 throw std::runtime_error("Throttler is shutting down, request aborted");
             }
         }
     }
 
 private:
-    // добавить токены, если прошло достаточно времени и разбудить ожидающие потоки
+    // добавить токены, если прошло достаточно времени и разбудить поток из головы очереди
     // может быть вызван только под mtx_ мьютексом
     void tryAddTokens() {
         const auto newTokens = static_cast<int>((Clock::now() - lastAddTokenTime_) / tokenAddInterval_);
         if (newTokens > 0) {
             currentTokensNum_ = std::min(currentTokensNum_ + newTokens, maxTokensNum_);
             lastAddTokenTime_ += std::chrono::duration_cast<Clock::duration>(newTokens * tokenAddInterval_);
-            cv_.notify_all();
+            if (!pendingRequests_.empty()) {
+                // разбудить текущую голову очереди
+                pendingRequests_.front()->wake();
+            }
         }
     }
 
     std::mutex              mtx_;
-    std::condition_variable cv_;
+    std::condition_variable guardCv_;
     Clock::time_point       lastAddTokenTime_;
     Duration                tokenAddInterval_;
     int                     maxTokensNum_{0};
@@ -106,9 +125,31 @@ private:
     int                     activeThrottleCalls_{0};
     bool                    isRunning_{true};
 
-    using TicketNumber = unsigned int; 
-    std::queue<TicketNumber> queue_;
-    TicketNumber             nextTicket_{0};
+    struct PendingRequest {
+        std::condition_variable cv_;
+        std::mutex mtx_;
+        bool awaken_{false};
+        bool cancelled_{false};
+
+        void wake() {
+            {
+                std::lock_guard lock{mtx_};
+                awaken_ = true;
+            }
+            cv_.notify_one();
+        }
+
+        void cancel() {
+            {
+                std::lock_guard lock{mtx_};
+                cancelled_ = true;
+            }
+            cv_.notify_one();
+        }
+    };
+    // PendingRequest некопируемый, поэтому в очереди указатели
+    using PendingRequestsQueue = std::queue<PendingRequest*>;
+    PendingRequestsQueue pendingRequests_;
 };
 
 } // namespace no_service_thread_fifo
