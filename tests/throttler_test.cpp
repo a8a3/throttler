@@ -10,7 +10,6 @@
 #include <memory>
 #include <string>
 #include <thread>
-#include <type_traits>
 #include <vector>
 
 using namespace std::chrono_literals;
