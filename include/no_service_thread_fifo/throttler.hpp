@@ -85,7 +85,7 @@ public:
                 request.cv_.wait_until(
                     requestLock, 
                     nextTokenTime,
-                    [&request] { return request.awaken_ || request.cancelled_; });
+                    [&request] { return request.cancelled_; });
             } else {
                 lock.unlock();
 
