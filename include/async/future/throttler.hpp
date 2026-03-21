@@ -69,9 +69,18 @@ private:
 
         std::unique_lock lock{mtx_};
         while(isRunning_) {
-            cv_.wait_for(lock, timePerToken_ - timeErr, [this] () {
-                return !isRunning_;
-            });
+            if (tokens_ == maxTokens_) {
+                // если токены пока никому не нужны- спать, пока кто-то не возьмет токен
+                // клиент, взявший токен пронотифицирует cv_
+                cv_.wait(lock, [this] () { 
+                    return tokens_ < maxTokens_ || !isRunning_; 
+                });
+            } else {
+                // если можно добавить токен, спать до времени следующего пополнения
+                cv_.wait_for(lock, timePerToken_ - timeErr, [this] () {
+                    return !isRunning_;
+                });
+            }
 
             if (!isRunning_) break;
 
@@ -92,6 +101,10 @@ private:
             requestsQueue_.front().set_value();
             requestsQueue_.pop();
             --tokens_;
+            if (tokens_ == maxTokens_ - 1) {
+                // в этой ситуации служебный поток спит на cv_
+                cv_.notify_one();
+            }
         }
     }
 
