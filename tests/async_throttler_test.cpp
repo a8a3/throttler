@@ -1,12 +1,13 @@
 #include <gtest/gtest.h>
 
+#include <callback/throttler.hpp>
 #include <future/throttler.hpp>
 
+#include <atomic>
 #include <chrono>
 #include <future>
 #include <mutex>
 #include <thread>
-#include <vector>
 
 using namespace std::chrono_literals;
 
@@ -194,17 +195,96 @@ TEST(AsyncFutureThrottlerTest, ConcurrentSubmittingAllFuturesComplete) {
 }
 
 TEST(AsyncCallbackThrottlerTest, ConstructorThrowsOnInvalidArguments) {
-    GTEST_SKIP() << "async::callback::Throttler is not implemented yet";
+    using async::callback::Throttler;
+
+    EXPECT_THROW(Throttler(0, 1), std::invalid_argument);
+    EXPECT_THROW(Throttler(-1, 1), std::invalid_argument);
+    EXPECT_THROW(Throttler(1, 0), std::invalid_argument);
+    EXPECT_THROW(Throttler(1, -1), std::invalid_argument);
+
+    EXPECT_NO_THROW(Throttler(1, 1));
 }
 
 TEST(AsyncCallbackThrottlerTest, ImmediateExecutionWithinCapacity) {
-    GTEST_SKIP() << "async::callback::Throttler is not implemented yet";
+    async::callback::Throttler throttler{5, 3};
+
+    std::atomic<int> executed{0};
+    std::promise<void> done;
+    auto fut = done.get_future();
+
+    for (int i = 0; i < 3; ++i) {
+        throttler.Throttle([&, i](bool cancelled) {
+            EXPECT_FALSE(cancelled);
+            if (++executed == 3) {
+                done.set_value();
+            }
+        });
+    }
+
+    ASSERT_EQ(fut.wait_for(100ms), std::future_status::ready);
+    EXPECT_EQ(executed.load(), 3);
 }
 
 TEST(AsyncCallbackThrottlerTest, PreservesFifoOrder) {
-    GTEST_SKIP() << "async::callback::Throttler is not implemented yet";
+    async::callback::Throttler throttler{2, 1};
+
+    // drain initial token
+    std::promise<void> firstDone;
+    throttler.Throttle([&](bool) { firstDone.set_value(); });
+    firstDone.get_future().wait();
+
+    std::mutex mtx;
+    std::vector<int> order;
+    std::promise<void> allDone;
+    auto allFut = allDone.get_future();
+
+    for (int i = 0; i < 3; ++i) {
+        throttler.Throttle([&, i](bool cancelled) {
+            EXPECT_FALSE(cancelled);
+            std::lock_guard lock{mtx};
+            order.push_back(i);
+            if (order.size() == 3) {
+                allDone.set_value();
+            }
+        });
+    }
+
+    ASSERT_EQ(allFut.wait_for(2500ms), std::future_status::ready);
+
+    std::lock_guard lock{mtx};
+    ASSERT_EQ(order.size(), 3u);
+    EXPECT_EQ(order[0], 0);
+    EXPECT_EQ(order[1], 1);
+    EXPECT_EQ(order[2], 2);
 }
 
 TEST(AsyncCallbackThrottlerTest, CancelsPendingOnShutdown) {
-    GTEST_SKIP() << "async::callback::Throttler is not implemented yet";
+    std::atomic<int> cancelledCount{0};
+    std::promise<void> allCancelled;
+    auto allFut = allCancelled.get_future();
+
+    {
+        auto throttler = std::make_unique<async::callback::Throttler>(1, 1);
+
+        // drain initial token
+        std::promise<void> firstDone;
+        throttler->Throttle([&](bool) { firstDone.set_value(); });
+        firstDone.get_future().wait();
+
+        // these should be pending
+        for (int i = 0; i < 2; ++i) {
+            throttler->Throttle([&](bool cancelled) {
+                EXPECT_TRUE(cancelled);
+                if (++cancelledCount == 2) {
+                    allCancelled.set_value();
+                }
+            });
+        }
+
+        // destroy throttler — should cancel pending callbacks
+        throttler.reset();
+    }
+
+    ASSERT_EQ(allFut.wait_for(500ms), std::future_status::ready);
+    EXPECT_EQ(cancelledCount.load(), 2);
 }
