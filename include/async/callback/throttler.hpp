@@ -64,7 +64,7 @@ private:
                 });
             } else if (0 == tokens_) {
                 // если нет токенов, спать пока нельзя будет добавить
-                cv_.wait_for(lock, timePerToken_ - timeErr, [this] () {
+                cv_.wait_until(lock, tp + timePerToken_, [this] () {
                     return !isRunning_;
                 });
             }
