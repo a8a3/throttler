@@ -2,6 +2,7 @@
 
 #include <callback/throttler.hpp>
 #include <future/throttler.hpp>
+#include <thread_pool/throttler.hpp>
 
 #include <atomic>
 #include <chrono>
@@ -194,19 +195,30 @@ TEST(AsyncFutureThrottlerTest, ConcurrentSubmittingAllFuturesComplete) {
     }
 }
 
-TEST(AsyncCallbackThrottlerTest, ConstructorThrowsOnInvalidArguments) {
-    using async::callback::Throttler;
+using CallbackThrottlerTypes = ::testing::Types<
+    async::callback::Throttler,
+    async::thread_pool::Throttler
+>;
 
-    EXPECT_THROW(Throttler(0, 1), std::invalid_argument);
-    EXPECT_THROW(Throttler(-1, 1), std::invalid_argument);
-    EXPECT_THROW(Throttler(1, 0), std::invalid_argument);
-    EXPECT_THROW(Throttler(1, -1), std::invalid_argument);
+template <typename T>
+class AsyncCallbackThrottlerTypedTest : public ::testing::Test {
+public:
+    AsyncCallbackThrottlerTypedTest() = default;
+};
 
-    EXPECT_NO_THROW(Throttler(1, 1));
+TYPED_TEST_SUITE(AsyncCallbackThrottlerTypedTest, CallbackThrottlerTypes);
+
+TYPED_TEST(AsyncCallbackThrottlerTypedTest, ConstructorThrowsOnInvalidArguments) {
+    EXPECT_THROW(TypeParam(0, 1), std::invalid_argument);
+    EXPECT_THROW(TypeParam(-1, 1), std::invalid_argument);
+    EXPECT_THROW(TypeParam(1, 0), std::invalid_argument);
+    EXPECT_THROW(TypeParam(1, -1), std::invalid_argument);
+
+    EXPECT_NO_THROW(TypeParam(1, 1));
 }
 
-TEST(AsyncCallbackThrottlerTest, ImmediateExecutionWithinCapacity) {
-    async::callback::Throttler throttler{5, 3};
+TYPED_TEST(AsyncCallbackThrottlerTypedTest, ImmediateExecutionWithinCapacity) {
+    TypeParam throttler{5, 3};
 
     std::atomic<int> executed{0};
     std::promise<void> done;
@@ -225,8 +237,8 @@ TEST(AsyncCallbackThrottlerTest, ImmediateExecutionWithinCapacity) {
     EXPECT_EQ(executed.load(), 3);
 }
 
-TEST(AsyncCallbackThrottlerTest, PreservesFifoOrder) {
-    async::callback::Throttler throttler{2, 1};
+TYPED_TEST(AsyncCallbackThrottlerTypedTest, PreservesFifoOrder) {
+    TypeParam throttler{2, 1};
 
     // drain initial token
     std::promise<void> firstDone;
@@ -258,13 +270,13 @@ TEST(AsyncCallbackThrottlerTest, PreservesFifoOrder) {
     EXPECT_EQ(order[2], 2);
 }
 
-TEST(AsyncCallbackThrottlerTest, CancelsPendingOnShutdown) {
+TYPED_TEST(AsyncCallbackThrottlerTypedTest, CancelsPendingOnShutdown) {
     std::atomic<int> cancelledCount{0};
     std::promise<void> allCancelled;
     auto allFut = allCancelled.get_future();
 
     {
-        auto throttler = std::make_unique<async::callback::Throttler>(1, 1);
+        auto throttler = std::make_unique<TypeParam>(1, 1);
 
         // drain initial token
         std::promise<void> firstDone;
@@ -287,4 +299,34 @@ TEST(AsyncCallbackThrottlerTest, CancelsPendingOnShutdown) {
 
     ASSERT_EQ(allFut.wait_for(500ms), std::future_status::ready);
     EXPECT_EQ(cancelledCount.load(), 2);
+}
+
+TYPED_TEST(AsyncCallbackThrottlerTypedTest, ThrowingCallbackDoesNotBreakThrottler) {
+    TypeParam throttler{10, 3};
+
+    std::atomic<int> executedCount{0};
+    std::promise<void> allDone;
+    auto allFut = allDone.get_future();
+
+    // first callback throws
+    throttler.Throttle([&](bool) {
+        ++executedCount;
+        throw std::runtime_error("callback error");
+    });
+
+    // next two should still execute normally
+    throttler.Throttle([&](bool cancelled) {
+        EXPECT_FALSE(cancelled);
+        ++executedCount;
+    });
+
+    throttler.Throttle([&](bool cancelled) {
+        EXPECT_FALSE(cancelled);
+        if (++executedCount == 3) {
+            allDone.set_value();
+        }
+    });
+
+    ASSERT_EQ(allFut.wait_for(500ms), std::future_status::ready);
+    EXPECT_EQ(executedCount.load(), 3);
 }
