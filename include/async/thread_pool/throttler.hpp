@@ -2,6 +2,7 @@
 
 #include <chrono>
 #include <condition_variable>
+#include <stdexcept>
 #include <functional>
 #include <mutex>
 #include <queue>
@@ -84,27 +85,37 @@ private:
             tp = endTp - timeErr;
         }
 
+        // выполнить оставшиеся в очереди коллбеки с пометкой "отменен"
+
+        std::vector<Callback> readyToPost;
         while (!requestsQueue_.empty()) {
-            auto cb = std::move(requestsQueue_.front());
+            readyToPost.emplace_back(std::move(requestsQueue_.front()));
             requestsQueue_.pop();
-            lock.unlock();
+
+        }
+        lock.unlock();
+        for (auto& cb: readyToPost) {
             boost::asio::post(pool_, [cb = std::move(cb)] () {
                 try{cb(true);} catch (...) {}
             });
-            lock.lock();
         }
     }
 
     // вызывается под мьютексом
     void TryDrainPendingRequestsQueue(std::unique_lock<std::mutex>& lock) {
+        std::vector<Callback> readyToPost;
         while (tokens_ > 0 && !requestsQueue_.empty()) {
-            auto cb = std::move(requestsQueue_.front());
+            readyToPost.emplace_back(std::move(requestsQueue_.front()));
             requestsQueue_.pop();
             --tokens_;
+        }
+        if (!readyToPost.empty()) {
             lock.unlock();
-            boost::asio::post(pool_, [cb = std::move(cb)] () {
-                try{cb(false);} catch (...) {}
-            });
+            for (auto& cb: readyToPost) {
+                boost::asio::post(pool_, [cb = std::move(cb)] () {
+                    try{cb(false);} catch (...) {}
+                });
+            }
             lock.lock();
         }
     }
